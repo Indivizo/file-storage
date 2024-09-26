@@ -14,10 +14,10 @@ import (
 	utils "github.com/Indivizo/go-utils"
 )
 
-type Uploader struct{}
+type FileManager struct{}
 
 // UploadFile uploads a file to File.io and returns a download URL
-func (f Uploader) UploadFile(groupID string, itemID string, filePath string, fileMetadata map[string]interface{}) (utils.Url, error) {
+func (f FileManager) UploadFile(groupID string, itemID string, filePath string, fileMetadata map[string]interface{}) (utils.Url, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", fmt.Errorf("unable to open file: %v", err)
@@ -78,8 +78,13 @@ func (f Uploader) UploadFile(groupID string, itemID string, filePath string, fil
 }
 
 // DeleteFile returns an error as deletion is not supported in File.io
-func (f Uploader) DeleteFile(groupID string, itemID string) error {
+func (f FileManager) DeleteFile(groupID string, itemID string) error {
 	return fmt.Errorf("file deletion is not supported by File.io")
 }
 
-var _ filestorage.FileManager = (*Uploader)(nil)
+// GetFileWithPrefix returns an error, since it is not implemented
+func (f FileManager) GetFileWithPrefix(prefix, filePath string) (file io.ReadSeeker, err error) {
+	return nil, fmt.Errorf("file upload is not implemented for File.io")
+}
+
+var _ filestorage.FileManager = (*FileManager)(nil)
