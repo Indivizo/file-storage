@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -8,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	filestorage "github.com/Indivizo/file-storage"
+	"github.com/pkg/errors"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -34,8 +37,8 @@ const accelerationStatusEnabled = "Enabled"
 // MaxFileSize is the maximum size of files we will accept uploading to s3.
 const MaxFileSize = 1024 * 1024 * 1024
 
-// Uploader manages file uploading to S3.
-type Uploader struct {
+// FileManager manages files in S3.
+type FileManager struct {
 	session *s3.S3
 	Debug   bool
 }
@@ -46,7 +49,7 @@ func getS3ObjectName(groupID string, itemID string) string {
 
 // UploadFile Uploads a file to amazon s3.
 // For a successful upload the S3 environment has to be configured based on https://github.com/aws/aws-sdk-go/wiki/configuring-sdk.
-func (s3up Uploader) UploadFile(groupID string, itemID string, filePath string, fileMetadata map[string]interface{}) (url utils.Url, err error) {
+func (s3f FileManager) UploadFile(groupID string, itemID string, filePath string, fileMetadata map[string]interface{}) (url utils.Url, err error) {
 	var file *os.File
 	var bucket string
 	itemName := getS3ObjectName(groupID, itemID)
@@ -63,8 +66,8 @@ func (s3up Uploader) UploadFile(groupID string, itemID string, filePath string, 
 	}
 	defer file.Close()
 
-	session := s3up.getSession()
-	if err = s3up.ensureBucket(bucket); err != nil {
+	session := s3f.getSession()
+	if err = s3f.ensureBucket(bucket); err != nil {
 		return "", err
 	}
 
@@ -93,7 +96,7 @@ func (s3up Uploader) UploadFile(groupID string, itemID string, filePath string, 
 	return utils.Url("https://s3." + Region + ".amazonaws.com/" + bucket + "/" + itemName), err
 }
 
-func (s3up Uploader) DeleteFile(groupID string, itemID string) (err error) {
+func (s3f FileManager) DeleteFile(groupID string, itemID string) (err error) {
 	var bucket string
 	itemName := getS3ObjectName(groupID, itemID)
 
@@ -101,7 +104,7 @@ func (s3up Uploader) DeleteFile(groupID string, itemID string) (err error) {
 		return err
 	}
 
-	session := s3up.getSession()
+	session := s3f.getSession()
 
 	_, err = session.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: &bucket,
@@ -114,12 +117,35 @@ func (s3up Uploader) DeleteFile(groupID string, itemID string) (err error) {
 	return nil
 }
 
-func (s3up *Uploader) getSession() *s3.S3 {
+func (s3f FileManager) GetFileWithPrefix(prefix, filePath string) (file io.ReadSeeker, err error) {
+	session := s3f.getSession()
+
+	resp, err := session.GetObject(&s3.GetObjectInput{
+		Bucket: &prefix,
+		Key:    &filePath,
+	})
+
+	if err != nil {
+		err = errors.Wrap(err, "Getting the object")
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		err = errors.Wrap(err, "Reading the response body")
+		return
+	}
+
+	file = bytes.NewReader(bodyBytes)
+	return
+}
+
+func (s3f *FileManager) getSession() *s3.S3 {
 	// Set up session if there is none yet.
-	if s3up.session == nil {
+	if s3f.session == nil {
 		var loglevel aws.LogLevelType
 
-		if s3up.Debug {
+		if s3f.Debug {
 			loglevel = aws.LogDebugWithSigning | aws.LogDebugWithHTTPBody | aws.LogDebugWithRequestErrors
 		}
 
@@ -127,10 +153,10 @@ func (s3up *Uploader) getSession() *s3.S3 {
 			Region:   aws.String(Region),
 			LogLevel: aws.LogLevel(loglevel),
 		}
-		s3up.session = s3.New(session.New(config))
+		s3f.session = s3.New(session.New(config))
 	}
 
-	return s3up.session
+	return s3f.session
 }
 
 // GetBucketName retrieves the bucket we upload to.
@@ -159,14 +185,14 @@ func GetBucketName() (string, error) {
 }
 
 // ensureBucket makes sure a bucket exists. If it doesn't, it creates it.
-func (s3up Uploader) ensureBucket(bucketName string) (err error) {
-	_, err = s3up.getSession().HeadBucket(&s3.HeadBucketInput{
+func (s3f FileManager) ensureBucket(bucketName string) (err error) {
+	_, err = s3f.getSession().HeadBucket(&s3.HeadBucketInput{
 		Bucket: &bucketName,
 	})
 
 	if err != nil {
 		log.WithField("Bucket", bucketName).Warning("Bucket doesn't exists")
-		err = s3up.createBucket(bucketName)
+		err = s3f.createBucket(bucketName)
 		return err
 	}
 
@@ -175,11 +201,11 @@ func (s3up Uploader) ensureBucket(bucketName string) (err error) {
 
 // GetS3Uploadendpoint returns the url to upload an s3 object for a bucket.
 // If the bucket is accelerated, it returns the accelerated url.
-func (s3up Uploader) GetS3Uploadendpoint(bucket string) string {
+func (s3f FileManager) GetS3Uploadendpoint(bucket string) string {
 	defaultEndpoint := "https://" + bucket + ".s3." + Region + ".amazonaws.com/"
 	acceleratedEndpoint := "https://" + bucket + ".s3-accelerate.amazonaws.com/"
 
-	acceleration, err := s3up.getSession().GetBucketAccelerateConfiguration(&s3.GetBucketAccelerateConfigurationInput{
+	acceleration, err := s3f.getSession().GetBucketAccelerateConfiguration(&s3.GetBucketAccelerateConfigurationInput{
 		Bucket: &bucket,
 	})
 	if err != nil || acceleration.Status == nil {
@@ -194,8 +220,8 @@ func (s3up Uploader) GetS3Uploadendpoint(bucket string) string {
 	return defaultEndpoint
 }
 
-func (s3up Uploader) createBucket(bucketName string) error {
-	session := s3up.getSession()
+func (s3f FileManager) createBucket(bucketName string) error {
+	session := s3f.getSession()
 
 	// Create the bucket
 	_, err := session.CreateBucket(&s3.CreateBucketInput{
@@ -315,8 +341,8 @@ type PolicyRequest struct {
 	Conditions          []interface{} `json:"conditions"`
 }
 
-func (s3up Uploader) getCredential() (string, error) {
-	session := s3up.getSession()
+func (s3f FileManager) getCredential() (string, error) {
+	session := s3f.getSession()
 
 	credentials, err := session.Client.Config.Credentials.Get()
 	shortDate := time.Now().Format(timeFormatShort)
@@ -324,8 +350,8 @@ func (s3up Uploader) getCredential() (string, error) {
 	return credentials.AccessKeyID + "/" + shortDate + "/" + Region + "/s3/aws4_request", err
 }
 
-func (s3up Uploader) getBrowserUploadPolicy(bucket, fileName string, fileSize int64, contentType string) (PolicyRequest, error) {
-	credential, err := s3up.getCredential()
+func (s3f FileManager) getBrowserUploadPolicy(bucket, fileName string, fileSize int64, contentType string) (PolicyRequest, error) {
+	credential, err := s3f.getCredential()
 	if err != nil {
 		return PolicyRequest{}, err
 	}
@@ -345,28 +371,28 @@ func (s3up Uploader) getBrowserUploadPolicy(bucket, fileName string, fileSize in
 	}, nil
 }
 
-func (s3up Uploader) GetBrowserUploadRequest(groupID string, itemID string, fileSize int64, contentType string) (PolicyResponse, error) {
+func (s3f FileManager) GetBrowserUploadRequest(groupID string, itemID string, fileSize int64, contentType string) (PolicyResponse, error) {
 	fileName := getS3ObjectName(groupID, itemID)
 
 	bucket, err := GetBucketName()
 	if err != nil {
 		return PolicyResponse{}, err
 	}
-	if err = s3up.ensureBucket(bucket); err != nil {
+	if err = s3f.ensureBucket(bucket); err != nil {
 		return PolicyResponse{}, err
 	}
 
-	credential, err := s3up.getCredential()
+	credential, err := s3f.getCredential()
 	if err != nil {
 		return PolicyResponse{}, err
 	}
 
-	credentials, err := s3up.getSession().Client.Config.Credentials.Get()
+	credentials, err := s3f.getSession().Client.Config.Credentials.Get()
 	if err != nil {
 		return PolicyResponse{}, err
 	}
 
-	request, err := s3up.getBrowserUploadPolicy(bucket, fileName, fileSize, contentType)
+	request, err := s3f.getBrowserUploadPolicy(bucket, fileName, fileSize, contentType)
 	if err != nil {
 		return PolicyResponse{}, err
 	}
@@ -389,7 +415,7 @@ func (s3up Uploader) GetBrowserUploadRequest(groupID string, itemID string, file
 	requestKey := makeHmac(serviceKey, []byte("aws4_request"))
 	signature := hex.EncodeToString(makeHmac(requestKey, []byte(encodedPolicy)))
 
-	url := s3up.GetS3Uploadendpoint(bucket)
+	url := s3f.GetS3Uploadendpoint(bucket)
 
 	return PolicyResponse{
 		URL:    url,
@@ -414,4 +440,4 @@ func makeHmac(key []byte, data []byte) []byte {
 	return hash.Sum(nil)
 }
 
-var _ filestorage.FileManager = (*Uploader)(nil)
+var _ filestorage.FileManager = (*FileManager)(nil)
